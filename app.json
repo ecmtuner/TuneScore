@@ -26,10 +26,11 @@
       "favicon": "./assets/favicon.png"
     },
     "extra": {
-      "anthropicApiKey": "INJECTED_AT_BUILD",
+      "anthropicApiKey": "",
       "eas": {
-        "projectId": ""
+        "projectId": "4f2233a8-db98-4f0f-907f-dafffb6be58a"
       }
-    }
+    },
+    "owner": "ecmtuner"
   }
 }
