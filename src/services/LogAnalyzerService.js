@@ -65,24 +65,31 @@ export function parseCSV(csvText) {
   let powerRunCount = 0;
 
   if (tpsIdx !== undefined && rpmIdx !== undefined) {
-    // Find last index where throttle was ≥ MIN_TPS_PCT — trim everything after next zero
-    let lastFullThrottleIdx = -1;
+    // Auto-detect throttle scale: 0-1 (normalized) vs 0-100 (percent)
+    const tpsSample = allRows
+      .map(r => parseFloat(r[tpsIdx]))
+      .filter(v => !isNaN(v));
+    const maxTps = Math.max(...tpsSample);
+    const tpsThreshold = maxTps <= 1.1
+      ? 0.95          // normalized 0-1 scale
+      : MIN_TPS_PCT;  // percent 0-100 scale
+
+    // Find last row where throttle was at WOT — trim everything after lift-off
+    let lastWOTIdx = -1;
     for (let i = allRows.length - 1; i >= 0; i--) {
       const tps = parseFloat(allRows[i][tpsIdx]);
-      if (!isNaN(tps) && tps >= MIN_TPS_PCT) { lastFullThrottleIdx = i; break; }
+      if (!isNaN(tps) && tps >= tpsThreshold) { lastWOTIdx = i; break; }
     }
-    // Trim rows after lift-off following last power pull
-    const trimmedRows = lastFullThrottleIdx >= 0
-      ? allRows.slice(0, lastFullThrottleIdx + 1)
+    const trimmedRows = lastWOTIdx >= 0
+      ? allRows.slice(0, lastWOTIdx + 1)
       : allRows;
 
-    // Keep only rows where TPS >= 95% AND RPM >= 3500
+    // Keep only WOT + high RPM rows
     powerRows = trimmedRows.filter(row => {
       const tps = parseFloat(row[tpsIdx]);
       const rpm = parseFloat(row[rpmIdx]);
-      return !isNaN(tps) && !isNaN(rpm) && tps >= MIN_TPS_PCT && rpm >= MIN_RPM;
+      return !isNaN(tps) && !isNaN(rpm) && tps >= tpsThreshold && rpm >= MIN_RPM;
     });
-    powerRunCount = powerRows.length;
   }
 
   // ── Compute stats — load channels from powerRows, thermal from allRows ──────
