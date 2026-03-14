@@ -288,11 +288,9 @@ export async function analyzeLog({ fileContent, filename, vehicleInfo, gear, fue
     const raw     = await AsyncStorage.getItem(HISTORY_KEY);
     const history = raw ? JSON.parse(raw) : [];
     history.unshift(entry);
-    if (history.length > 10) history.splice(10);
+    if (history.length > 20) history.splice(20);
     await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(history));
   } catch (e) { console.warn('LogAnalyzer: history save failed', e); }
-
-  }
 
   return entry;
 }
