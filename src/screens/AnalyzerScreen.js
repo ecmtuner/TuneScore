@@ -3,6 +3,10 @@ import {
   View, Text, TouchableOpacity, StyleSheet, ScrollView,
   ActivityIndicator, Alert, StatusBar, TextInput,
 } from 'react-native';
+
+const FUEL_OPTIONS   = ['E0', 'E30', 'E50', 'E85'];
+const ENGINE_OPTIONS = ['N55', 'B58', 'S55', 'S63', 'S58', 'N20', 'Other'];
+const GEAR_OPTIONS   = ['Any', '3', '4', '5', '6'];
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
@@ -152,6 +156,9 @@ export default function AnalyzerScreen() {
   const [vehicleInfo, setVehicle] = useState('');
   const [loading, setLoading]     = useState(false);
   const [report, setReport]       = useState(null);
+  const [fuelType, setFuelType]   = useState('E0');
+  const [engineFamily, setEngine] = useState('Other');
+  const [gear, setGear]           = useState('Any');
 
   const pickFile = async () => {
     try {
@@ -174,7 +181,14 @@ export default function AnalyzerScreen() {
     setLoading(true);
     try {
       const content = await FileSystem.readAsStringAsync(file.uri);
-      const result = await analyzeLog({ fileContent: content, filename: file.name, vehicleInfo });
+      const result = await analyzeLog({
+        fileContent:  content,
+        filename:     file.name,
+        vehicleInfo,
+        fuelType:     fuelType.toLowerCase(),
+        engineFamily: engineFamily === 'Other' ? 'other' : engineFamily,
+        gear:         gear === 'Any' ? null : gear,
+      });
       setReport(result);
     } catch (e) {
       Alert.alert('Analysis Failed', e.message);
@@ -205,11 +219,63 @@ export default function AnalyzerScreen() {
           <Text style={styles.inputLabel}>VEHICLE (optional)</Text>
           <TextInput
             style={styles.input}
-            placeholder="e.g. 2021 BMW M3 B58"
+            placeholder="e.g. 2022 BMW M5 S63"
             placeholderTextColor="#444"
             value={vehicleInfo}
             onChangeText={setVehicle}
           />
+        </View>
+
+        {/* Tune Config */}
+        <View style={styles.configCard}>
+          <View style={styles.configRow}>
+            <Text style={styles.configLabel}>ENGINE</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.pillRow}>
+                {ENGINE_OPTIONS.map(e => (
+                  <TouchableOpacity
+                    key={e}
+                    style={[styles.pill, engineFamily === e && styles.pillActive]}
+                    onPress={() => setEngine(e)}
+                  >
+                    <Text style={[styles.pillText, engineFamily === e && styles.pillTextActive]}>{e}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+          </View>
+          <View style={styles.configRow}>
+            <Text style={styles.configLabel}>FUEL TYPE</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.pillRow}>
+                {FUEL_OPTIONS.map(f => (
+                  <TouchableOpacity
+                    key={f}
+                    style={[styles.pill, fuelType === f && styles.pillActive]}
+                    onPress={() => setFuelType(f)}
+                  >
+                    <Text style={[styles.pillText, fuelType === f && styles.pillTextActive]}>{f}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+          </View>
+          <View style={styles.configRow}>
+            <Text style={styles.configLabel}>LOG GEAR</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.pillRow}>
+                {GEAR_OPTIONS.map(g => (
+                  <TouchableOpacity
+                    key={g}
+                    style={[styles.pill, gear === g && styles.pillActive]}
+                    onPress={() => setGear(g)}
+                  >
+                    <Text style={[styles.pillText, gear === g && styles.pillTextActive]}>{g === 'Any' ? 'Any Gear' : `Gear ${g}`}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+          </View>
         </View>
 
         {/* Upload box */}
@@ -277,6 +343,21 @@ const styles = StyleSheet.create({
   inputCard: { backgroundColor: CARD, borderRadius: 12, padding: 14, marginBottom: 16, borderWidth: 1, borderColor: BORDER },
   inputLabel: { color: '#444', fontSize: 10, fontWeight: '700', letterSpacing: 1.5, marginBottom: 8 },
   input: { color: '#fff', fontSize: 15, padding: 0 },
+
+  configCard: {
+    backgroundColor: CARD, borderRadius: 14, padding: 14,
+    borderWidth: 1, borderColor: BORDER, marginBottom: 16, gap: 14,
+  },
+  configRow: { gap: 8 },
+  configLabel: { color: '#444', fontSize: 10, fontWeight: '700', letterSpacing: 1.5 },
+  pillRow: { flexDirection: 'row', gap: 8 },
+  pill: {
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20,
+    borderWidth: 1, borderColor: '#222', backgroundColor: '#080808',
+  },
+  pillActive: { borderColor: ACCENT, backgroundColor: ACCENT + '22' },
+  pillText: { color: '#444', fontSize: 12, fontWeight: '700' },
+  pillTextActive: { color: ACCENT },
 
   uploadBox: {
     borderWidth: 2, borderColor: '#222', borderStyle: 'dashed',
