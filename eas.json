@@ -1,6 +1,6 @@
 {
   "cli": {
-    "version": ">= 5.0.0"
+    "version": ">= 18.0.0"
   },
   "build": {
     "preview": {
@@ -11,6 +11,7 @@
       }
     },
     "production": {
+      "autoIncrement": true,
       "distribution": "store",
       "android": {
         "buildType": "app-bundle"
