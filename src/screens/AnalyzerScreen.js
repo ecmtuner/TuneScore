@@ -53,6 +53,8 @@ function ChannelCard({ ch, data }) {
   if (!data) return null;
   const color = statusColor(data.status);
   const isNA = data.status === 'N/A';
+  const score = typeof data.score === 'number' ? data.score : null;
+
   return (
     <View style={styles.channelCard}>
       <View style={styles.channelHeader}>
@@ -62,16 +64,17 @@ function ChannelCard({ ch, data }) {
           <Text style={[styles.badgeText, { color }]}>{data.status}</Text>
         </View>
       </View>
-      {!isNA && (
-        <View style={styles.statsRow}>
-          {['min', 'avg', 'max'].map(k => (
-            <View key={k} style={styles.statBox}>
-              <Text style={styles.statLabel}>{k.toUpperCase()}</Text>
-              <Text style={styles.statValue}>{fmt(data[k])}{ch.unit}</Text>
-            </View>
-          ))}
+
+      {/* Score bar — shown when we have a numeric score */}
+      {!isNA && score !== null && (
+        <View style={styles.scoreBarRow}>
+          <View style={styles.scoreBarTrack}>
+            <View style={[styles.scoreBarFill, { width: `${score}%`, backgroundColor: color }]} />
+          </View>
+          <Text style={[styles.scoreBarLabel, { color }]}>{score}</Text>
         </View>
       )}
+
       {data.note ? <Text style={styles.channelNote}>{data.note}</Text> : null}
     </View>
   );
@@ -445,7 +448,12 @@ const styles = StyleSheet.create({
   statBox: { flex: 1, alignItems: 'center', backgroundColor: '#0a0a0a', borderRadius: 8, padding: 8 },
   statLabel: { color: '#444', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
   statValue: { color: '#fff', fontSize: 13, fontWeight: '800', marginTop: 2 },
-  channelNote: { color: '#777', fontSize: 12, lineHeight: 18 },
+  channelNote: { color: '#777', fontSize: 12, lineHeight: 18, marginTop: 4 },
+
+  scoreBarRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
+  scoreBarTrack: { flex: 1, height: 6, backgroundColor: '#1a1a1a', borderRadius: 3, overflow: 'hidden' },
+  scoreBarFill: { height: '100%', borderRadius: 3 },
+  scoreBarLabel: { fontSize: 13, fontWeight: '800', width: 28, textAlign: 'right' },
 
   recCard: { backgroundColor: CARD, borderRadius: 12, padding: 16, borderWidth: 1, borderColor: BORDER, marginBottom: 20, gap: 10 },
   recRow: { flexDirection: 'row', gap: 8 },
