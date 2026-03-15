@@ -1,224 +1,423 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-
 import Constants from 'expo-constants';
 
 // ─── Anthropic API Key ────────────────────────────────────────────────────────
 const ANTHROPIC_API_KEY = Constants.expoConfig?.extra?.anthropicApiKey || '';
 
-
-
 const HISTORY_KEY = 'tunescore_history';
 
-// ─── Analysis scope ───────────────────────────────────────────────────────────
-const LOAD_CHANNELS = new Set(['timing', 'knock', 'afr', 'boost']);
-const MIN_TPS_PCT   = 95;
-const MIN_RPM       = 4000;
-const MAX_RPM       = 7200;
+// ─── Stoichiometric ratios by fuel ────────────────────────────────────────────
+const STOICH = { pump: 14.7, e30: 13.5, e40: 13.0, e45: 12.7, e85: 9.8 };
 
-// ─── Engine-specific AFR targets at WOT [min, max] ───────────────────────────
-const ENGINE_AFR_TARGETS = {
-  'N55':  { e0:[11.5,12.2], e30:[11.2,11.8], e50:[10.8,11.5], e85:[9.8,10.8]  },
-  'B58':  { e0:[11.5,12.2], e30:[11.2,11.8], e50:[10.8,11.5], e85:[9.8,10.8]  },
-  'S55':  { e0:[11.3,12.0], e30:[11.0,11.6], e50:[10.5,11.3], e85:[9.5,10.5]  },
-  'S63':  { e0:[11.3,12.0], e30:[11.0,11.6], e50:[10.5,11.3], e85:[9.5,10.5]  },
-  'S58':  { e0:[11.5,12.2], e30:[11.2,11.8], e50:[10.8,11.5], e85:[9.8,10.8]  },
-  'N20':  { e0:[11.8,12.5], e30:[11.4,12.0], e50:[11.0,11.6], e85:[10.0,11.0] },
-  'other':{ e0:[11.5,12.5], e30:[11.0,12.0], e50:[10.5,11.5], e85:[9.5,10.8]  },
+// ─── AFR targets per fuel (ideal / acceptable) ────────────────────────────────
+const AFR_TARGETS = {
+  pump: { ideal: [12.0, 12.8], acceptable: [11.5, 13.2] },
+  e30:  { ideal: [11.8, 12.5], acceptable: [11.2, 13.0] },
+  e40:  { ideal: [11.5, 12.3], acceptable: [11.0, 12.8] },
+  e45:  { ideal: [11.3, 12.2], acceptable: [10.8, 12.5] },
+  e85:  { ideal: [10.5, 11.5], acceptable: [10.0, 12.0] },
 };
-
-const ENGINE_BOOST_MAX = {
-  'N55': { e0:22, e30:23, e50:24, e85:26 },
-  'B58': { e0:24, e30:25, e50:26, e85:28 },
-  'S55': { e0:26, e30:27, e50:28, e85:30 },
-  'S63': { e0:24, e30:25, e50:26, e85:28 },
-  'S58': { e0:28, e30:29, e50:30, e85:32 },
-  'N20': { e0:18, e30:19, e50:20, e85:22 },
-  'other':{ e0:22, e30:23, e50:24, e85:26 },
-};
-
-const KNOCK_WARN = { e0:2.0, e30:2.5, e50:3.0, e85:3.5 };
-const KNOCK_CRIT = { e0:3.5, e30:4.0, e50:5.0, e85:6.0 };
 
 // ─── Column aliases ───────────────────────────────────────────────────────────
+// Order matters — first match wins. More-specific names come first.
 const CHANNEL_ALIASES = {
-  coolant:  ['coolant temp', 'clt', 'engine coolant temperature', 'coolant', 'ect', 'water temp'],
-  iat:      ['iat', 'intake air temp', 'air temp', 'intake air temperature', 'charge temp', 'inlet temp'],
-  timing:   ['ignition timing 1', 'ignition timing', 'timing', 'ign timing', 'spark advance', 'ignition cyl 1'],
-  knock:    ['knock detected', 'knock retard', 'knock activity', 'knock sum', 'knock level', 'knock'],
-  afr:      ['lambda[afr]', 'afr', 'lambda act', 'air fuel ratio', 'wideband', 'lambda['],
-  boost:    ['boost (pre-throttle)', 'boost pressure', 'boost', 'map', 'manifold pressure', 'boost psi'],
-  battery:  ['battery', 'battery voltage', 'batt v', 'voltage', 'supply voltage'],
-  rpm:      ['engine speed', 'rpm', 'engine rpm'],
-  throttle: ['accel. pedal', 'throttle angle', 'tps', 'throttle position', 'pedal position'],
-  gear:     ['gear'],
+  // BM3: "Accel. Pedal[%]"  MHD: "Accel Ped. Pos. (%)"
+  accelPedal: [
+    'accel. pedal[%]', 'accel. pedal', 'accel ped. pos. (%)', 'accel ped. pos.',
+    'accelerator pedal', 'accel pedal', 'pedal position', 'pedal',
+    'throttle position sensor', 'app',
+  ],
+  // BM3: "Engine speed[1/min]"  MHD: no RPM column
+  rpm: ['engine speed[1/min]', 'engine speed', 'rpm', 'engine rpm', 'n_eng'],
+  // BM3: "Boost (Pre-Throttle)[psig]"  MHD: "Boost (PSI)"
+  boostActual: [
+    'boost (pre-throttle)[psig]', 'boost (pre-throttle)',
+    'map[psig]', 'map',
+    'boost (psi)', 'boost pressure (psi)', 'boost pressure', 'boost[psi]', 'boost',
+    '(bm3) boost (map) custom[psig]',
+  ],
+  // BM3: "Boost pressure (Target)[psig]"  MHD: "Boost target (PSI)"
+  boostTarget: [
+    'boost pressure (target)[psig]', 'boost pressure (target)',
+    'boost target (psi)', 'boost target', 'target boost',
+  ],
+  // BM3: "Boost Pressure (Deviation)[psia]"  MHD: "Boost deviation (PSI)"
+  boostDev: [
+    'boost pressure (deviation)[psia]', 'boost pressure (deviation)',
+    'boost deviation (psi)', 'boost deviation',
+  ],
+  // BM3: "Lambda Act.[AFR]" (lambda ratio — needs ×stoich)
+  // MHD: "Lambda 1 (AFR)" (already AFR)
+  afrBank1: [
+    'lambda act.[afr]', 'lambda act. (bank 1)[afr]', 'lambda act. (bank 1)[-]',
+    'lambda act. (bank 1)', 'lambda act.',
+    'lambda 1 (afr)', 'lambda 1', 'afr', 'lambda', 'o2 bank 1',
+  ],
+  afrBank2: [
+    'lambda act. (bank 2)[afr]', 'lambda act. (bank 2)[-]', 'lambda act. (bank 2)',
+    'lambda 2 (afr)', 'lambda 2', 'o2 bank 2',
+  ],
+  // BM3: "(RAM) Ignition Timing Corr. Cyl. N[-|°]"
+  // MHD: "Cyl1 Timing Cor (*)" … "Cyl8 Timing Cor (*)"
+  knockCyl1: [
+    '(ram) ignition timing corr. cyl. 1[-]', '(ram) ignition timing corr. cyl. 1[°]',
+    '(ram) ignition timing corr. cyl. 1',
+    'cyl1 timing cor (*)', 'cyl1 timing cor', 'knock cyl 1', 'knock correction 1',
+  ],
+  knockCyl2: [
+    '(ram) ignition timing corr. cyl. 2[-]', '(ram) ignition timing corr. cyl. 2[°]',
+    '(ram) ignition timing corr. cyl. 2',
+    'cyl2 timing cor (*)', 'cyl2 timing cor', 'knock cyl 2', 'knock correction 2',
+  ],
+  knockCyl3: [
+    '(ram) ignition timing corr. cyl. 3[-]', '(ram) ignition timing corr. cyl. 3[°]',
+    '(ram) ignition timing corr. cyl. 3',
+    'cyl3 timing cor (*)', 'cyl3 timing cor', 'knock cyl 3', 'knock correction 3',
+  ],
+  knockCyl4: [
+    '(ram) ignition timing corr. cyl. 4[-]', '(ram) ignition timing corr. cyl. 4[°]',
+    '(ram) ignition timing corr. cyl. 4',
+    'cyl4 timing cor (*)', 'cyl4 timing cor', 'knock cyl 4', 'knock correction 4',
+  ],
+  knockCyl5: [
+    '(ram) ignition timing corr. cyl. 5[-]', '(ram) ignition timing corr. cyl. 5[°]',
+    '(ram) ignition timing corr. cyl. 5',
+    'cyl5 timing cor (*)', 'cyl5 timing cor', 'knock cyl 5', 'knock correction 5',
+  ],
+  knockCyl6: [
+    '(ram) ignition timing corr. cyl. 6[-]', '(ram) ignition timing corr. cyl. 6[°]',
+    '(ram) ignition timing corr. cyl. 6',
+    'cyl6 timing cor (*)', 'cyl6 timing cor', 'knock cyl 6', 'knock correction 6',
+  ],
+  knockCyl7: ['cyl7 timing cor (*)', 'cyl7 timing cor', 'knock cyl 7', 'knock correction 7'],
+  knockCyl8: ['cyl8 timing cor (*)', 'cyl8 timing cor', 'knock cyl 8', 'knock correction 8'],
+  // IAT: BM3 "IAT[F]"  MHD: "IAT (*F)" or "Charge air temp. (*F)"
+  iat: [
+    'iat[f]', 'iat (*f)', 'iat', 'intake air temp', 'intake air temperature',
+    'charge air temp. (*f)', 'charge air temp.', 'air temp', 't_ansaug',
+  ],
+  coolant: ['coolant temp[f]', 'coolant temp', 'coolant temperature', 'water temp', 't_water'],
+  throttleAngle: [
+    'throttle angle[%]', 'throttle angle', 'throttle position', 'throttle',
+    'throttle pos.', 'throttle pos.[%]', 'throttle valve pos.', 'throttle valve[%]',
+  ],
+  gear:    ['gear[-]', 'gear', 'current gear'],
+  ethanol: ['(bm3) flex ethanol % (main)[%]', 'flex ethanol %', 'ethanol content', 'flex %'],
+  battery: ['battery voltage', 'battery', 'batt v', 'voltage', 'supply voltage'],
+  ignTiming: ['ignition timing 1[deg]', 'ignition timing 1', 'ignition timing', 'ign timing'],
 };
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function findCol(headers, aliases) {
+  const lower = headers.map(h => h.toLowerCase().trim());
+  for (const alias of aliases) {
+    const idx = lower.findIndex(h => h === alias);
+    if (idx >= 0) return idx;
+  }
+  // Fallback: partial match
+  for (const alias of aliases) {
+    const idx = lower.findIndex(h => h.includes(alias));
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+function pct(arr, p) {
+  if (!arr.length) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length * p)] ?? sorted[sorted.length - 1];
+}
+
+// Convert lambda ratio → AFR if needed
+// BM3 stores lambda (< 2.0); MHD stores AFR directly
+function toAFR(val, fuelKey) {
+  if (val < 2.0) return val * (STOICH[fuelKey] || 14.7);
+  return val;
+}
+
+// AFR validity filter — strip sentinels (BM3: 19.11, MHD: 235.2) and junk
+function isValidAFRRaw(val) {
+  return val > 8 && val < 20;
+}
 
 // ─── CSV Parser ───────────────────────────────────────────────────────────────
 export function parseCSV(csvText, options = {}) {
-  const { gear, fuelType = 'e0', engineFamily = 'other' } = options;
+  const { gear, fuelType = 'pump', motorType = 'stock' } = options;
 
-  const lines = csvText.split(/\r?\n/).filter(l => l.trim());
+  // Normalize line endings (MHD uses \r\n)
+  const normalized = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // Strip comment/metadata lines (MHD uses # prefix)
+  const lines = normalized
+    .split('\n')
+    .filter(l => {
+      const t = l.trim();
+      return t.length > 0 && !t.startsWith('#') && !t.startsWith(';') && !t.startsWith('//');
+    });
+
   if (lines.length < 2) throw new Error('CSV file is empty or has no data rows.');
 
+  // Find header line
   let headerIdx = 0;
   for (let i = 0; i < Math.min(10, lines.length); i++) {
-    if (lines[i].split(',').length > 3) { headerIdx = i; break; }
+    const lower = lines[i].toLowerCase();
+    if (lower.includes('time') || lower.includes('rpm') || lower.includes('engine speed') ||
+        lower.includes('boost') || lower.includes('accel')) {
+      headerIdx = i;
+      break;
+    }
   }
 
   const rawHeaders = lines[headerIdx].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
   const dataLines  = lines.slice(headerIdx + 1);
 
-  // Map channels to column indices
+  // Map all channels to column indices
   const colMap = {};
-  rawHeaders.forEach((h, idx) => {
-    const lower = h.toLowerCase();
-    for (const [channel, aliases] of Object.entries(CHANNEL_ALIASES)) {
-      if (!colMap[channel] && aliases.some(a => lower.includes(a))) {
-        colMap[channel] = idx;
-      }
-    }
-  });
+  for (const [channel, aliases] of Object.entries(CHANNEL_ALIASES)) {
+    const idx = findCol(rawHeaders, aliases);
+    if (idx >= 0) colMap[channel] = idx;
+  }
 
+  // Parse all rows
   const allRows = dataLines
     .map(line => line.split(',').map(v => v.trim().replace(/^"|"$/g, '')))
     .filter(cols => cols.length >= rawHeaders.length / 2);
 
-  // ── WOT + RPM band filter ─────────────────────────────────────────────────
-  const tpsIdx  = colMap['throttle'];
-  const rpmIdx  = colMap['rpm'];
-  const gearIdx = colMap['gear'];
+  const getNum = (row, channel) => {
+    const idx = colMap[channel];
+    if (idx === undefined || !row[idx]) return null;
+    const n = parseFloat(row[idx]);
+    return isNaN(n) ? null : n;
+  };
 
-  // Auto-detect throttle scale (0-1 vs 0-100)
-  let tpsThreshold = MIN_TPS_PCT;
-  if (tpsIdx !== undefined) {
-    const tpsSample = allRows.map(r => parseFloat(r[tpsIdx])).filter(v => !isNaN(v));
-    const maxTps = Math.max(...tpsSample);
-    if (maxTps <= 1.1) tpsThreshold = 0.95;
-  }
+  // ── WOT Detection (spec-accurate) ─────────────────────────────────────────
+  // Check what data we actually have
+  const hasRpm    = allRows.some(r => (getNum(r, 'rpm') ?? 0) > 0);
+  const hasPedal  = allRows.some(r => {
+    const p = getNum(r, 'accelPedal') ?? getNum(r, 'throttleAngle') ?? 0;
+    return p > 0;
+  });
 
-  let powerRows = allRows;
-  let powerRunRows = 0;
+  const isWOT = (row) => {
+    const pedal   = getNum(row, 'accelPedal') ?? getNum(row, 'throttleAngle') ?? 0;
+    const rpm     = getNum(row, 'rpm') ?? 0;
+    const boost   = getNum(row, 'boostActual') ?? 0;
+    const atPedal = pedal > 85;
 
-  if (tpsIdx !== undefined && rpmIdx !== undefined) {
-    // Find last WOT point, trim post-lift-off coasting
-    let lastWOTIdx = -1;
-    for (let i = allRows.length - 1; i >= 0; i--) {
-      const tps = parseFloat(allRows[i][tpsIdx]);
-      if (!isNaN(tps) && tps >= tpsThreshold) { lastWOTIdx = i; break; }
-    }
-    const trimmedRows = lastWOTIdx >= 0 ? allRows.slice(0, lastWOTIdx + 1) : allRows;
+    if (hasPedal && hasRpm)  return atPedal && rpm > 2500;
+    if (hasPedal && !hasRpm) return atPedal && boost > 3;   // MHD: no RPM col
+    return rpm > 3000 && boost > 5;                          // No pedal col
+  };
 
-    // Keep WOT rows in RPM band, optionally filter by gear
-    powerRows = trimmedRows.filter(row => {
-      const tps  = parseFloat(row[tpsIdx]);
-      const rpm  = parseFloat(row[rpmIdx]);
-      if (isNaN(tps) || isNaN(rpm)) return false;
-      if (tps < tpsThreshold || rpm < MIN_RPM || rpm > MAX_RPM) return false;
-      // Gear filter — if user specified a gear and log has gear data
-      if (gear && gearIdx !== undefined) {
-        const rowGear = parseFloat(row[gearIdx]);
-        if (!isNaN(rowGear) && rowGear !== parseFloat(gear)) return false;
-      }
-      return true;
+  let wotRows = allRows.filter(isWOT);
+
+  // Gear filter
+  if (gear && gear !== 'Any' && colMap['gear'] !== undefined) {
+    wotRows = wotRows.filter(r => {
+      const g = getNum(r, 'gear');
+      return g !== null && g === parseFloat(gear);
     });
-    powerRunRows = powerRows.length;
   }
 
-  // ── Compute stats ─────────────────────────────────────────────────────────
-  const stats = {};
-  for (const [channel, colIdx] of Object.entries(colMap)) {
-    const useRows = LOAD_CHANNELS.has(channel) ? powerRows : allRows;
-    const vals = useRows.map(r => parseFloat(r[colIdx])).filter(v => !isNaN(v));
-    if (vals.length === 0) continue;
-    stats[channel] = {
-      min:   Math.min(...vals),
-      max:   Math.max(...vals),
-      avg:   vals.reduce((a, b) => a + b, 0) / vals.length,
-      count: vals.length,
-      fullThrottleOnly: LOAD_CHANNELS.has(channel),
-    };
-  }
+  // ── Boost target inference ─────────────────────────────────────────────────
+  const fullBoostRows = wotRows.filter(r => (getNum(r, 'boostActual') ?? 0) > 10);
+  const boostActuals  = fullBoostRows.map(r => getNum(r, 'boostActual')).filter(Boolean);
+  const boostTargets  = fullBoostRows.map(r => getNum(r, 'boostTarget')).filter(Boolean);
+  const peakActual    = boostActuals.length ? Math.max(...boostActuals) : 0;
+  const logTarget     = boostTargets.length ? Math.max(...boostTargets) : 0;
+  const p90Boost      = pct(boostActuals, 0.90);
+  // If log target is within 5 psi of peak, trust it; otherwise infer from p90
+  const realTarget    = Math.abs(peakActual - logTarget) <= 5 ? logTarget : p90Boost;
 
-  // Sample power rows for AI context
-  const sampleSource = powerRows.length >= 10 ? powerRows : allRows;
-  const sampleSize   = Math.min(500, sampleSource.length);
-  const step         = Math.max(1, Math.floor(sampleSource.length / sampleSize));
-  const sampledRows  = sampleSource.filter((_, i) => i % step === 0).slice(0, sampleSize);
+  // ── Per-cylinder knock stats ───────────────────────────────────────────────
+  const knockCols = ['knockCyl1','knockCyl2','knockCyl3','knockCyl4',
+                     'knockCyl5','knockCyl6','knockCyl7','knockCyl8'];
+  const detectedKnockCols = knockCols.filter(k => colMap[k] !== undefined);
+  const cylinderCount = detectedKnockCols.length || 4;
+
+  // Worst correction per cylinder across all WOT rows
+  const worstPerCyl = detectedKnockCols.map(col => {
+    const vals = wotRows.map(r => getNum(r, col)).filter(v => v !== null);
+    return vals.length ? Math.min(...vals) : 0;
+  });
+
+  const cylsKnocking = worstPerCyl.filter(v => v < -0.5).length;
+  const maxKnockCorr = worstPerCyl.length ? Math.min(...worstPerCyl) : 0;
+
+  // ── AFR stats (sentinel-filtered) ─────────────────────────────────────────
+  const fuelKey = fuelType.toLowerCase().replace('-', '');
+  const afrRaws = wotRows
+    .map(r => getNum(r, 'afrBank1'))
+    .filter(v => v !== null)
+    .map(v => toAFR(v, fuelKey))
+    .filter(isValidAFRRaw);
+
+  const avgAFR  = afrRaws.length ? afrRaws.reduce((a, b) => a + b, 0) / afrRaws.length : null;
+  const minAFR  = afrRaws.length ? Math.min(...afrRaws) : null;
+  const maxAFR  = afrRaws.length ? Math.max(...afrRaws) : null;
+
+  // ── IAT stats ─────────────────────────────────────────────────────────────
+  const iatVals  = wotRows.map(r => getNum(r, 'iat')).filter(v => v !== null && v > 0 && v < 250);
+  const avgIAT   = iatVals.length ? iatVals.reduce((a, b) => a + b, 0) / iatVals.length : null;
+  const iatRise  = iatVals.length >= 2 ? iatVals[iatVals.length - 1] - iatVals[0] : 0;
+
+  // ── Boost deviations ─────────────────────────────────────────────────────
+  const hasDevCol   = fullBoostRows.some(r => (getNum(r, 'boostDev') ?? 0) !== 0);
+  const boostDevs   = fullBoostRows.map(r => {
+    if (hasDevCol) return Math.abs(getNum(r, 'boostDev') ?? 0);
+    return Math.abs((getNum(r, 'boostActual') ?? 0) - realTarget);
+  }).filter(v => v >= 0 && v < 20);
+  const avgBoostDev = boostDevs.length ? boostDevs.reduce((a, b) => a + b, 0) / boostDevs.length : null;
+  const maxBoostDev = boostDevs.length ? Math.max(...boostDevs) : null;
+
+  // ── Ethanol detection ─────────────────────────────────────────────────────
+  const ethanolVals = allRows.map(r => getNum(r, 'ethanol')).filter(v => v !== null && v > 0 && v <= 100);
+  const detectedEthanol = ethanolVals.length
+    ? Math.round(ethanolVals.reduce((a, b) => a + b, 0) / ethanolVals.length)
+    : null;
 
   return {
     headers: rawHeaders,
     colMap,
-    stats,
-    sampledRows,
-    totalRows:    allRows.length,
-    powerRunRows,
-    hasThrottleFilter: tpsIdx !== undefined && rpmIdx !== undefined,
-    fuelType,
-    engineFamily,
-    gear: gear || null,
+    wotRows,
+    totalRows:       allRows.length,
+    powerRunRows:    wotRows.length,
+    cylinderCount,
+    worstPerCyl,
+    cylsKnocking,
+    maxKnockCorr,
+    peakBoost:       peakActual,
+    realTarget,
+    avgBoostDev,
+    maxBoostDev,
+    avgAFR,
+    minAFR,
+    maxAFR,
+    avgIAT,
+    iatRise,
+    detectedEthanol,
+    fuelType:        fuelKey,
+    motorType,
+    gear:            gear || null,
+    hasRpm,
+    hasPedal,
+    hasDevCol,
   };
 }
 
 // ─── AI Prompt ────────────────────────────────────────────────────────────────
 function buildPrompt(parsed, filename) {
-  const { stats, totalRows, powerRunRows, hasThrottleFilter, fuelType, engineFamily, gear } = parsed;
+  const {
+    totalRows, powerRunRows, cylinderCount,
+    worstPerCyl, cylsKnocking, maxKnockCorr,
+    peakBoost, realTarget, avgBoostDev, maxBoostDev,
+    avgAFR, minAFR, maxAFR,
+    avgIAT, iatRise,
+    detectedEthanol, fuelType, motorType,
+    hasRpm, hasPedal,
+  } = parsed;
 
-  const fuelKey  = (fuelType  || 'e0').toLowerCase().replace('-','');
-  const engKey   = (engineFamily || 'other').toUpperCase();
-  const afrRange = ENGINE_AFR_TARGETS[engKey]?.[fuelKey] || ENGINE_AFR_TARGETS['other'][fuelKey] || [11.5, 12.5];
-  const boostMax = ENGINE_BOOST_MAX[engKey]?.[fuelKey]   || ENGINE_BOOST_MAX['other'][fuelKey]   || 24;
-  const knockW   = KNOCK_WARN[fuelKey] || 2.0;
-  const knockC   = KNOCK_CRIT[fuelKey] || 3.5;
+  const fuelKey = fuelType || 'pump';
+  const afrTarget = AFR_TARGETS[fuelKey] || AFR_TARGETS['pump'];
+  const isBuilt = motorType === 'built';
 
-  const statsText = Object.entries(stats)
-    .map(([ch, s]) => {
-      const tag = s.fullThrottleOnly ? '[WOT 4000-7200 RPM ONLY]' : '[ALL DATA]';
-      return `${ch.toUpperCase()} ${tag}: min=${s.min.toFixed(2)}, max=${s.max.toFixed(2)}, avg=${s.avg.toFixed(2)} (${s.count} samples)`;
-    }).join('\n');
+  // Knock thresholds
+  const knockThresh = isBuilt
+    ? { mild: -2.5, moderate: -5.0, severe: -8.0 }
+    : { mild: -1.5, moderate: -3.0, severe: -5.0 };
 
-  const filterNote = hasThrottleFilter
-    ? `DATA FILTER: WOT only (TPS ≥ 95%, RPM 4000–7200, post-lift-off trimmed). ${powerRunRows} qualifying rows from ${totalRows} total.${gear ? ` Gear ${gear} only.` : ''}`
-    : `Note: Throttle/RPM not detected — using all ${totalRows} rows.`;
+  const knockPens = isBuilt
+    ? { mild: 2, moderate: 6, severe: 14, critical: 22 }
+    : { mild: 3, moderate: 8, severe: 18, critical: 28 };
 
-  return `You are an expert BMW performance tuner analyzing an ECU datalog.
+  const spreadThreshold = isBuilt ? 6 : 5;
+
+  // Per-cyl knock summary
+  const cylKnockLines = worstPerCyl
+    .map((v, i) => `  Cyl ${i + 1}: worst ${v.toFixed(1)}°`)
+    .join('\n');
+
+  // Boost deviation context
+  const boostDevText = avgBoostDev !== null
+    ? `avg dev from target: ${avgBoostDev.toFixed(2)} psi, max dev: ${(maxBoostDev ?? 0).toFixed(1)} psi, inferred target: ${realTarget.toFixed(1)} psi`
+    : 'no boost deviation data';
+
+  // AFR context
+  const afrText = avgAFR !== null
+    ? `avg: ${avgAFR.toFixed(2)}, min: ${(minAFR ?? 0).toFixed(2)}, max: ${(maxAFR ?? 0).toFixed(2)}`
+    : 'no valid AFR data (sentinels filtered)';
+
+  // IAT context
+  const iatText = avgIAT !== null
+    ? `avg: ${avgIAT.toFixed(0)}°F, rise during pull: ${iatRise.toFixed(0)}°F`
+    : 'no IAT data';
+
+  const ethanolNote = detectedEthanol !== null
+    ? `Flex sensor detected ${detectedEthanol}% ethanol`
+    : 'No flex sensor data';
+
+  const wotMethod = hasPedal && hasRpm
+    ? 'pedal >85% AND rpm >2500'
+    : hasPedal
+    ? 'pedal >85% AND boost >3 psi (MHD — no RPM col)'
+    : 'rpm >3000 AND boost >5 psi (no pedal col)';
+
+  return `You are an expert ECU tuning analyst. Score this datalog precisely.
 
 FILE: ${filename}
-ENGINE: ${engineFamily || 'Unknown'}
-FUEL: ${fuelType?.toUpperCase() || 'Unknown'}${gear ? `\nGEAR: ${gear}` : ''}
+FUEL: ${fuelKey.toUpperCase()}
+MOTOR: ${motorType.toUpperCase()} (${isBuilt ? 'forged internals — relaxed thresholds' : 'stock internals — strict thresholds'})
+WOT DETECTION METHOD: ${wotMethod}
+WOT SAMPLES: ${powerRunRows} of ${totalRows} total rows
+CYLINDERS DETECTED: ${cylinderCount}
+${ethanolNote}
 
-${filterNote}
+── KNOCK DATA (WOT only, worst correction per cylinder) ──
+${cylKnockLines}
+Cylinders with any knock (< -0.5°): ${cylsKnocking}
+Worst single correction: ${maxKnockCorr.toFixed(1)}°
+Thresholds for ${motorType}: mild=${knockThresh.mild}°, moderate=${knockThresh.moderate}°, severe=${knockThresh.severe}°
+Penalties: mild=-${knockPens.mild}, moderate=-${knockPens.moderate}, severe=-${knockPens.severe}, critical=-${knockPens.critical}
+Simultaneous knock multiplier: ×1.5 if 2+ cyls
+Spread penalty: -12 pts if ${spreadThreshold}+ cyls knocking
 
-CHANNEL STATISTICS:
-${statsText || 'No recognized channels found.'}
+── AFR DATA (WOT, sentinel-filtered: stripped >20 and <8) ──
+${afrText}
+Target for ${fuelKey.toUpperCase()}: ideal ${afrTarget.ideal[0]}–${afrTarget.ideal[1]}, acceptable ${afrTarget.acceptable[0]}–${afrTarget.acceptable[1]}
+Scoring per sample: ideal=100, acceptable=75, lean=max(0, 75 - overLean×20), rich=max(50, 75 - overRich×5)
 
-ENGINE-SPECIFIC THRESHOLDS FOR THIS TUNE:
-- AFR target at WOT: ${afrRange[0]}–${afrRange[1]} (${fuelType} on ${engineFamily})
-- Boost max expected: ${boostMax} psi
-- Knock retard WARNING threshold: ${knockW}°, CRITICAL: ${knockC}°
-- Timing pull on ANY cylinder at WOT = flag immediately
-- On ${fuelType}: ${fuelKey === 'e0' ? 'conservative fueling, any lean spike is dangerous' : fuelKey === 'e85' ? 'ethanol allows more timing advance, lean AFR is still dangerous' : 'ethanol blend — richer AFR targets than pump gas'}
+── BOOST DATA (WOT, > 10 psi rows only) ──
+Peak boost: ${peakBoost.toFixed(1)} psi
+${boostDevText}
+${isBuilt ? 'Built penalties: avg>2=-15, avg>4=-20more, avg>6=-20more, max>7=-10warn' : 'Stock penalties: avg>1=-15, avg>3=-20more, avg>5=-20more, max>5=-10warn'}
 
+── IAT DATA (WOT) ──
+${iatText}
+Scoring: <85°F=100, <95°F=85, <105°F=70, <115°F=50, ≥115°F=30. Heat soak (rise >10°F): -10 additional.
+
+── SCORING WEIGHTS ──
+Knock: 40%, AFR: 25%, Boost: 20%, IAT: 15%
+Grade: A=90-100, B=80-89, C=70-79, D=60-69, F<60
+
+Score each category 0-100 using the exact formulas above, then compute the weighted overall.
 Return ONLY valid JSON, no markdown:
 {
-  "healthScore": <0-100>,
-  "summary": "<2-3 sentences with specific values>",
+  "healthScore": <0-100 weighted overall>,
   "grade": "<A|B|C|D|F>",
+  "summary": "<2-3 sentences with specific values from the data>",
   "channels": {
-    "coolant": { "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>", "min": <n|null>, "max": <n|null>, "avg": <n|null> },
-    "iat":     { "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>", "min": <n|null>, "max": <n|null>, "avg": <n|null> },
-    "timing":  { "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>", "min": <n|null>, "max": <n|null>, "avg": <n|null> },
-    "knock":   { "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>", "min": <n|null>, "max": <n|null>, "avg": <n|null> },
-    "afr":     { "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>", "min": <n|null>, "max": <n|null>, "avg": <n|null> },
-    "boost":   { "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>", "min": <n|null>, "max": <n|null>, "avg": <n|null> },
-    "battery": { "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>", "min": <n|null>, "max": <n|null>, "avg": <n|null> }
+    "knock":  { "score": <0-100>, "status": "<OK|WARNING|CRITICAL>", "note": "<specific detail>" },
+    "afr":    { "score": <0-100>, "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>" },
+    "boost":  { "score": <0-100>, "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>" },
+    "iat":    { "score": <0-100>, "status": "<OK|WARNING|CRITICAL|N/A>", "note": "<specific>" },
+    "coolant":{ "score": null, "status": "N/A", "note": "not scored" },
+    "timing": { "score": null, "status": "N/A", "note": "use knock corrections instead" },
+    "battery":{ "score": null, "status": "N/A", "note": "not scored" }
   },
   "recommendations": ["<rec 1>", "<rec 2>", "<rec 3>"],
-  "professionalTuneNeeded": <true|false>
-}
-
-Scoring: A=90-100, B=80-89, C=70-79, D=60-69, F<60
-Set professionalTuneNeeded=true if ANY CRITICAL or 2+ WARNINGs`;
+  "professionalTuneNeeded": <true if ANY CRITICAL or 2+ WARNINGs>
+}`;
 }
 
 // ─── Claude API ───────────────────────────────────────────────────────────────
@@ -250,37 +449,36 @@ async function callClaude(prompt) {
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
-export async function analyzeLog({ fileContent, filename, vehicleInfo, gear, fuelType, engineFamily }) {
-  const parsed = parseCSV(fileContent, { gear, fuelType, engineFamily });
+export async function analyzeLog({ fileContent, filename, vehicleInfo, gear, fuelType, motorType }) {
+  const parsed = parseCSV(fileContent, { gear, fuelType, motorType });
   const prompt = buildPrompt(parsed, filename);
   const report = await callClaude(prompt);
 
-  // Fill nulls from local stats
-  for (const [channel, localStats] of Object.entries(parsed.stats)) {
-    if (report.channels[channel]) {
-      const ch = report.channels[channel];
-      if (ch.min == null) ch.min = parseFloat(localStats.min.toFixed(2));
-      if (ch.max == null) ch.max = parseFloat(localStats.max.toFixed(2));
-      if (ch.avg == null) ch.avg = parseFloat(localStats.avg.toFixed(2));
-    }
-  }
-
   const entry = {
-    id:          Date.now().toString(),
+    id:           Date.now().toString(),
     filename,
-    carName:     vehicleInfo || 'Unknown Vehicle',
-    gear:        gear || null,
-    fuelType:    fuelType || 'e0',
-    engineFamily:engineFamily || 'other',
-    date:        new Date().toISOString(),
-    healthScore: report.healthScore,
-    grade:       report.grade || 'C',
-    summary:     report.summary,
-    channels:    report.channels,
-    recommendations: report.recommendations,
+    carName:      vehicleInfo || 'Unknown Vehicle',
+    gear:         gear || null,
+    fuelType:     parsed.fuelType,
+    motorType:    motorType || 'stock',
+    date:         new Date().toISOString(),
+    healthScore:  report.healthScore,
+    grade:        report.grade || 'C',
+    summary:      report.summary,
+    channels:     report.channels,
+    recommendations:       report.recommendations,
     professionalTuneNeeded: report.professionalTuneNeeded || false,
-    totalRows:   parsed.totalRows,
-    powerRunRows:parsed.powerRunRows,
+    totalRows:    parsed.totalRows,
+    powerRunRows: parsed.powerRunRows,
+    // Key stats for history display
+    stats: {
+      peakBoost:      parsed.peakBoost,
+      avgAFR:         parsed.avgAFR,
+      maxKnockCorr:   parsed.maxKnockCorr,
+      avgIAT:         parsed.avgIAT,
+      cylinderCount:  parsed.cylinderCount,
+      cylsKnocking:   parsed.cylsKnocking,
+    },
   };
 
   // AsyncStorage history

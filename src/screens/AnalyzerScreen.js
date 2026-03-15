@@ -4,7 +4,8 @@ import {
   ActivityIndicator, Alert, StatusBar, TextInput,
 } from 'react-native';
 
-const FUEL_OPTIONS   = ['E0', 'E30', 'E50', 'E85'];
+const FUEL_OPTIONS   = ['Pump', 'E30', 'E40', 'E45', 'E85'];
+const MOTOR_OPTIONS  = ['Stock', 'Built'];
 const ENGINE_OPTIONS = ['N55', 'B58', 'S55', 'S63', 'S58', 'N20', 'Other'];
 const GEAR_OPTIONS   = ['Any', '3', '4', '5', '6'];
 import * as DocumentPicker from 'expo-document-picker';
@@ -96,7 +97,9 @@ function ReportView({ report, onReset }) {
           </View>
         </View>
         <Text style={styles.scoreSummary}>{report.summary}</Text>
-        <Text style={styles.scoreFile}>📄 {report.filename} · {report.totalRows?.toLocaleString()} rows</Text>
+        <Text style={styles.scoreFile}>
+          📄 {report.filename} · {report.totalRows?.toLocaleString()} rows · {report.fuelType?.toUpperCase()} · {report.motorType ? report.motorType.charAt(0).toUpperCase() + report.motorType.slice(1) : 'Stock'} motor
+        </Text>
 
         {report.professionalTuneNeeded && (
           <View style={styles.tuneAlert}>
@@ -156,7 +159,8 @@ export default function AnalyzerScreen() {
   const [vehicleInfo, setVehicle] = useState('');
   const [loading, setLoading]     = useState(false);
   const [report, setReport]       = useState(null);
-  const [fuelType, setFuelType]   = useState('E0');
+  const [fuelType, setFuelType]   = useState('Pump');
+  const [motorType, setMotor]     = useState('Stock');
   const [engineFamily, setEngine] = useState('Other');
   const [gear, setGear]           = useState('Any');
 
@@ -186,6 +190,7 @@ export default function AnalyzerScreen() {
         filename:     file.name,
         vehicleInfo,
         fuelType:     fuelType.toLowerCase(),
+        motorType:    motorType.toLowerCase(),
         engineFamily: engineFamily === 'Other' ? 'other' : engineFamily,
         gear:         gear === 'Any' ? null : gear,
       });
@@ -259,6 +264,22 @@ export default function AnalyzerScreen() {
                 ))}
               </View>
             </ScrollView>
+          </View>
+          <View style={styles.configRow}>
+            <Text style={styles.configLabel}>MOTOR TYPE</Text>
+            <View style={styles.pillRow}>
+              {MOTOR_OPTIONS.map(m => (
+                <TouchableOpacity
+                  key={m}
+                  style={[styles.pill, motorType === m && styles.pillActive]}
+                  onPress={() => setMotor(m)}
+                >
+                  <Text style={[styles.pillText, motorType === m && styles.pillTextActive]}>
+                    {m === 'Stock' ? '🔩 Stock' : '🏗️ Built'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
           <View style={styles.configRow}>
             <Text style={styles.configLabel}>LOG GEAR</Text>
